@@ -1,73 +1,77 @@
-name: CI/CD Pipeline
+name: Test and Deploy
 
-on:
-  push:
-    branches:
-      - main
+on: [push, pull_request]
+
+env:
+  DOCKER_USERNAME: kingdaivid
+  DOCKER_PASSWORD: dckr_pat_1rOZNwckipBOn7J0AkCjAy94eGw
 
 jobs:
-  build:
-    name: Build & Push Docker Image
+  test-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+    
+    - name: Run Test
+      timeout-minutes: 15
+      run: |
+        set -e  # יציאה בשגיאה
+        
+        echo "Starting Docker services..."
+        docker compose up -d
+        
+        echo "Waiting for services to be ready..."
+        sleep 30
+        
+        echo "Running tests..."
+        # הרצת הבדיקה ושמירת הלוג
+        if TEST_OUTPUT=$(docker compose run --rm test_client python server_test.py 2>&1); then
+          echo "Test command executed successfully"
+          echo "Test output: $TEST_OUTPUT"
+          
+          # בדיקה אם הפלט מכיל "0" (הצלחה)
+          if echo "$TEST_OUTPUT" | grep -q "^0$"; then
+            echo "✅ SUCCESS: Test passed - output contains 0"
+          else
+            echo "❌ FAILED: Test failed - output is '$TEST_OUTPUT' (expected 0)"
+            docker compose down
+            exit 1
+          fi
+        else
+          echo "❌ FAILED: Test command failed to execute"
+          docker compose down
+          exit 1
+        fi
+        
+        echo "Cleaning up Docker services..."
+        docker compose down
+    
+    - name: Login and Push
+      if: success()
+      timeout-minutes: 10
+      run: |
+        set -e  # יציאה בשגיאה
+        
+        echo "Logging into Docker Hub..."
+        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+        
+        # יצירת גרסה חדשה על בסיס run number
+        VERSION="1.0.${{ github.run_number }}"
+        echo "Building version: $VERSION (run #${{ github.run_number }})"
+        
+        # בניה ודחיפה עם docker build רגיל
+        echo "Building Docker images..."
+        docker build -t $DOCKER_USERNAME/task-todo-app:$VERSION .
+        docker tag $DOCKER_USERNAME/task-todo-app:$VERSION $DOCKER_USERNAME/task-todo-app:latest
+        
+        echo "Pushing images to Docker Hub..."
+        docker push $DOCKER_USERNAME/task-todo-app:$VERSION
+        docker push $DOCKER_USERNAME/task-todo-app:latest
+        
+        echo "✅ DONE - Image uploaded to Docker Hub!"
+        echo "✅ Version: $VERSION"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Log in to DockerHub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v3
-        with:
-          context: .
-          push: true
-          tags: yehoda1234/task_todo5:latest
-
-  deploy:
-    name: Deploy to AWS EC2
-    runs-on: ubuntu-latest
-    needs: build
-    if: ${{ needs.build.result == 'success' }}
-    steps:
-      - name: Prepare SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-      - name: Deploy via SSH
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << 'EOF'
-            # התקנת Docker אם לא קיים
-            if ! command -v docker &> /dev/null
-            then
-              sudo apt-get update -y || sudo yum update -y
-              sudo apt-get install -y docker.io || sudo yum install -y docker
-              sudo systemctl enable --now docker
-            fi
-
-            # התקנת Docker Compose אם לא קיים
-            if ! command -v docker-compose &> /dev/null
-            then
-              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
-            fi
-
-            # כניסה ל-DockerHub
-            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-
-            # עדכון הקונטיינר
-            docker pull yehoda1234/task_todo5:latest
-            docker stop task_todo || true
-            docker rm task_todo || true
-            docker run -d --restart=always --name task_todo -p 80:5000 yehoda1234/task_todo5:latest
-          EOF
+        echo "✅ Latest tag also updated"
+ 
