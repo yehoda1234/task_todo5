@@ -72,4 +72,48 @@ jobs:
         
         echo "✅ DONE - Image uploaded to Docker Hub!"
         echo "✅ Version: $VERSION"
+
         echo "✅ Latest tag also updated"
+    deploy:
+        name: Deploy to AWS EC2
+        runs-on: ubuntu-latest
+        needs: build
+        if: ${{ needs.build.result == 'success' }}
+        steps:
+          - name: Prepare SSH key
+            run: |
+              mkdir -p ~/.ssh
+              echo "${{ secrets.AWS_SSH_KEY }}" > ~/.ssh/deploy_key
+              chmod 600 ~/.ssh/deploy_key
+
+          - name: Connect & Deploy on EC2
+            env:
+              DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+              DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+            run: |
+              ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << 'EOF'
+                # התקנת Docker + Compose אם לא קיימים
+                if ! command -v docker &> /dev/null
+                -then
+                    sudo apt-get update -y || sudo yum update -y
+                    sudo apt-get install -y docker.io || sudo yum install -y docker
+                    sudo systemctl enable --now docker
+                  fi
+
+                  if ! command -v docker-compose &> /dev/null
+                  then
+                    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                    sudo chmod +x /usr/local/bin/docker-compose
+                  fi
+
+                  # כניסה ל-DockerHub
+                  echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+
+                  # עדכון הקונטיינר
+                  docker pull yehoda1234/task_todo5:latest
+                  docker stop task_todo || true
+                  docker rm task_todo || true
+                  docker run -d --restart=always --name task_todo -p 80:5000 yehoda1234/task_todo5:latest
+                EOF
+
+       
